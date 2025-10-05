@@ -1,0 +1,20 @@
+# Streamlit secrets - NEVER commit this!
+Streamlit/.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+.Python
+venv/
+env/
+.venv/
+.env
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+
+# Streamlit cache
+.streamlit/cache/
