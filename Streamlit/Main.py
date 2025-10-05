@@ -483,58 +483,68 @@ if st.session_state.page == "main":
             
             # Check if quiz already generated
             if i in st.session_state.saved_quizzes:
-                # Quiz exists - show take quiz button prominently
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    st.markdown(f"**✅ Material {i+1}:** {para_preview}")
-                    st.caption(f"{len(st.session_state.saved_quizzes[i])} questions ready • {len(para)} characters")
-                with col2:
-                    if st.button("📖 Take Quiz", key=f"take_quiz_{i}", use_container_width=True):
-                        st.session_state.current_quiz_index = i
-                        st.session_state.user_answers = {}
-                        st.session_state.show_results = False
-                        st.session_state.page = "quiz"
-                        st.rerun()
-                with col3:
-                    if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, help="Regenerate quiz"):
-                        del st.session_state.saved_quizzes[i]
-                        with st.spinner("🤖 Regenerating..."):
-                            quiz, error = generate_quiz(para, st.session_state.num_questions)
-                        
-                        if error:
-                            st.error(f"❌ {error}")
-                        elif quiz:
-                            st.session_state.saved_quizzes[i] = quiz
-                            st.session_state.api_calls_made += 1
-                            st.success(f"✅ New quiz ready!")
-                            st.rerun()
-            else:
-                # No quiz yet - show generate button prominently
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col1:
-                    st.markdown(f"**📄 Material {i+1}:** {para_preview}")
-                    st.caption(f"Ready to generate • {len(para)} characters")
-                with col2:
-                    if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, type="primary"):
-                        with st.spinner("🤖 Creating quiz..."):
-                            quiz, error = generate_quiz(para, st.session_state.num_questions)
-                        
-                        if error:
-                            st.error(f"❌ {error}")
-                        elif quiz:
-                            st.session_state.saved_quizzes[i] = quiz
-                            st.session_state.api_calls_made += 1
-                            st.success(f"✅ Quiz ready! Click 'Take Quiz' to start.")
-                            st.rerun()
-                with col3:
-                    if st.button("👁️", key=f"view_{i}", use_container_width=True, help="View full text"):
-                        with st.expander("Full Text", expanded=True):
-                            st.text(para)
-            
-            st.markdown("---")
+            # Saved paragraphs - Simplified view
+if st.session_state.paragraphs:
+    st.markdown("<div class='card'>", unsafe_allow_html=True)
+    st.subheader(f"📚 My Study Materials ({len(st.session_state.paragraphs)})")
+    
+    for i, para in enumerate(st.session_state.paragraphs):
+        para_preview = para[:120] + "..." if len(para) > 120 else para
         
-        st.markdown("</div>", unsafe_allow_html=True)
-
+        # Check if quiz already generated
+        if i in st.session_state.saved_quizzes:
+            col1, col2, col3 = st.columns([3, 1, 1])
+            with col1:
+                st.markdown(f"**✅ Material {i+1}:** {para_preview}")
+                st.caption(f"{len(st.session_state.saved_quizzes[i])} questions ready • {len(para)} characters")
+            with col2:
+                if st.button("📖 Take Quiz", key=f"take_quiz_{i}", use_container_width=True):
+                    st.session_state.current_quiz_index = i
+                    st.session_state.user_answers = {}
+                    st.session_state.show_results = False
+                    st.session_state.page = "quiz"
+                    st.rerun()
+            with col3:
+                if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, help="Regenerate quiz"):
+                    del st.session_state.saved_quizzes[i]
+                    with st.spinner("🤖 Regenerating..."):
+                        quiz, error = generate_quiz(para, st.session_state.num_questions)
+                    
+                    if error:
+                        st.error(f"{error}")
+                    elif quiz:
+                        st.session_state.saved_quizzes[i] = quiz
+                        st.session_state.api_calls_made += 1
+                        st.success("New quiz ready!")
+                        st.rerun()
+        else:
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.markdown(f"**📄 Material {i+1}:** {para_preview}")
+                st.caption(f"Ready to generate • {len(para)} characters")
+            with col2:
+                if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, type="primary"):
+                    with st.spinner("🤖 Creating quiz..."):
+                        quiz, error = generate_quiz(para, st.session_state.num_questions)
+                    
+                    if error:
+                        st.error(f"{error}")
+                    elif quiz:
+                        st.session_state.saved_quizzes[i] = quiz
+                        st.session_state.api_calls_made += 1
+                        st.success("Quiz ready! Click 'Take Quiz' to start.")
+                        st.rerun()
+        
+        # Optional: Show full text in expander below
+        if len(para) > 120:
+            with st.expander(f"View full text"):
+                st.text(para)
+        
+        st.markdown("---")
+    
+    st.markdown("</div>", unsafe_allow_html=True)  
+        
+        
 # -------------------------
 # QUIZ LIBRARY PAGE
 # -------------------------
@@ -767,4 +777,5 @@ elif st.session_state.page == "history":
             st.success("History cleared!")
             st.rerun()
         
+
         st.markdown("</div>", unsafe_allow_html=True)
