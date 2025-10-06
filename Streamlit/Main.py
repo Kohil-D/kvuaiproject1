@@ -72,13 +72,6 @@ def generate_quiz(text, num_questions=5):
     if not API_KEY:
         return None, "API key is required."
     
-    # Remove local rate limiting - let OpenAI handle it
-    # if "last_api_call" in st.session_state:
-    #     elapsed = time.time() - st.session_state.last_api_call
-    #     if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
-    #         wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
-    #         return None, f"⏳ Please wait {wait_time} seconds before generating another quiz."
-    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {API_KEY}"
@@ -110,13 +103,13 @@ Text to analyze:
 {text[:2000]}"""
 
     data = {
-        "model": "gpt-3.5-turbo",
+        "model": "gpt-4o-mini",  # Using newer model instead of gpt-3.5-turbo
         "messages": [
             {"role": "system", "content": "You are a helpful quiz generator that returns only valid JSON responses."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.5,
-        "max_tokens": 2048
+        "max_tokens": 1500  # Reduced from 2048
     }
 
     # Retry logic
@@ -171,12 +164,44 @@ Your API key is not working. Please check:
 """
             
             if response.status_code == 403:
-                return None, "❌ Access denied. Add credits at https://platform.openai.com/account/billing"
+                return None, """❌ **Access Denied - No Billing Setup**
+                
+Your API key exists but has no access. This means:
+
+**You MUST set up billing first:**
+1. Go to: https://platform.openai.com/account/billing/overview
+2. Click "Add payment method"
+3. Add a credit/debit card
+4. Add at least $5 in credits
+5. Wait 5-10 minutes for activation
+
+**Note:** Even with a valid API key, you CANNOT use the API without adding a payment method and credits.
+
+Check your account status: https://platform.openai.com/account/billing/overview
+"""
             
             if response.status_code != 200:
                 error_data = response.json() if response.text else {}
                 error_message = error_data.get('error', {}).get('message', 'Unknown error')
-                return None, f"❌ API Error {response.status_code}: {error_message}"
+                
+                # Show detailed error
+                return None, f"""❌ **OpenAI API Error {response.status_code}**
+
+{error_message}
+
+**Common Issues:**
+- 401: Invalid API key
+- 403: No billing/credits set up
+- 429: Rate limit or quota exceeded
+- 500: OpenAI server error (try again)
+
+**Check:**
+1. API Key: https://platform.openai.com/api-keys
+2. Billing: https://platform.openai.com/account/billing/overview
+3. Usage: https://platform.openai.com/usage
+
+**Full error:** {error_data}
+"""
 
             result = response.json()
             generated_text = result['choices'][0]['message']['content'].strip()
@@ -555,15 +580,8 @@ if st.session_state.page == "main":
                         st.session_state.page = "quiz"
                         st.rerun()
                 with col3:
-                    can_regenerate = True
-                    if st.session_state.last_api_call > 0:
-                        elapsed = time.time() - st.session_state.last_api_call
-                        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
-                            can_regenerate = False
-                    
-                    if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, 
-                                help="Regenerate quiz" if can_regenerate else f"Wait {int(RATE_LIMIT_CONFIG['min_delay_seconds'] - elapsed)}s",
-                                disabled=not can_regenerate):
+                    # No more local rate limiting
+                    if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, help="Regenerate quiz"):
                         del st.session_state.saved_quizzes[i]
                         with st.spinner("🤖 Regenerating..."):
                             quiz, error = generate_quiz(para, st.session_state.num_questions)
@@ -573,6 +591,7 @@ if st.session_state.page == "main":
                         elif quiz:
                             st.session_state.saved_quizzes[i] = quiz
                             st.session_state.api_calls_made += 1
+                            st.session_state.last_api_call = time.time()  # Record successful call
                             st.success("New quiz ready!")
                             st.rerun()
             else:
@@ -581,18 +600,8 @@ if st.session_state.page == "main":
                     st.markdown(f"**📄 Material {i+1}:** {para_preview}")
                     st.caption(f"Ready to generate • {len(para)} characters")
                 with col2:
-                    can_generate = True
-                    wait_time = 0
-                    if st.session_state.last_api_call > 0:
-                        elapsed = time.time() - st.session_state.last_api_call
-                        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
-                            can_generate = False
-                            wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
-                    
-                    if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, 
-                                type="primary",
-                                disabled=not can_generate,
-                                help=f"Wait {wait_time}s" if not can_generate else "Generate quiz"):
+                    # No more local rate limiting - just check button state
+                    if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, type="primary"):
                         with st.spinner("🤖 Creating quiz..."):
                             quiz, error = generate_quiz(para, st.session_state.num_questions)
                         
@@ -601,6 +610,7 @@ if st.session_state.page == "main":
                         elif quiz:
                             st.session_state.saved_quizzes[i] = quiz
                             st.session_state.api_calls_made += 1
+                            st.session_state.last_api_call = time.time()  # Record successful call
                             st.success("Quiz ready! Click 'Take Quiz' to start.")
                             st.rerun()
             
@@ -774,12 +784,12 @@ elif st.session_state.page == "quiz":
                         st.session_state.page = "main"
                         st.session_state.show_results = False
                         st.rerun()
+
 # -------------------------
 # HISTORY PAGE
 # -------------------------
 elif st.session_state.page == "history":
     st.title("📊 Quiz History")
-    
     if not st.session_state.quiz_history:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.info("📝 No quiz history yet. Complete a quiz to see your progress!")
@@ -789,10 +799,7 @@ elif st.session_state.page == "history":
         st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
-        
-        # Summary stats
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             st.markdown(f"""
             <div class='stats-box'>
@@ -800,7 +807,6 @@ elif st.session_state.page == "history":
                 <div class='stats-label'>Total Attempts</div>
             </div>
             """, unsafe_allow_html=True)
-        
         with col2:
             avg = sum(h["score"] for h in st.session_state.quiz_history) / len(st.session_state.quiz_history)
             st.markdown(f"""
@@ -809,7 +815,6 @@ elif st.session_state.page == "history":
                 <div class='stats-label'>Average Score</div>
             </div>
             """, unsafe_allow_html=True)
-        
         with col3:
             best = max(h["score"] for h in st.session_state.quiz_history)
             st.markdown(f"""
@@ -818,23 +823,19 @@ elif st.session_state.page == "history":
                 <div class='stats-label'>Best Score</div>
             </div>
             """, unsafe_allow_html=True)
-        
         st.markdown("### Recent Attempts")
-        
         for i, rec in enumerate(reversed(st.session_state.quiz_history)):
             idx = len(st.session_state.quiz_history) - i
             with st.expander(f"Attempt {idx} - {rec['date']} - Score: {rec['score']:.1f}%"):
                 st.markdown(f"**Quiz:** Paragraph {rec.get('quiz_index', 'Unknown') + 1}")
                 st.markdown(f"**Score:** {rec['correct']}/{rec['total']} ({rec['score']:.1f}%)")
                 st.progress(rec['score'] / 100)
-        
         if st.button("🗑️ Clear History", key="clear_history", use_container_width=True):
             st.session_state.quiz_history = []
             st.success("History cleared!")
             st.rerun()
-        
-
         st.markdown("</div>", unsafe_allow_html=True)
+
 
 
 
