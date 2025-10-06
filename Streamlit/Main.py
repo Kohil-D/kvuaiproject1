@@ -72,12 +72,12 @@ def generate_quiz(text, num_questions=5):
     if not API_KEY:
         return None, "API key is required."
     
-    # Check last request time
-    if "last_api_call" in st.session_state:
-        elapsed = time.time() - st.session_state.last_api_call
-        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
-            wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
-            return None, f"⏳ Please wait {wait_time} seconds before generating another quiz."
+    # Remove local rate limiting - let OpenAI handle it
+    # if "last_api_call" in st.session_state:
+    #     elapsed = time.time() - st.session_state.last_api_call
+    #     if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
+    #         wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
+    #         return None, f"⏳ Please wait {wait_time} seconds before generating another quiz."
     
     headers = {
         "Content-Type": "application/json",
@@ -122,7 +122,6 @@ Text to analyze:
     # Retry logic
     for attempt in range(RATE_LIMIT_CONFIG["max_retries"]):
         try:
-            st.session_state.last_api_call = time.time()
             response = requests.post(OPENAI_URL, headers=headers, json=data, timeout=30)
             
             if response.status_code == 429:
@@ -133,22 +132,43 @@ Text to analyze:
                     retry_after = RATE_LIMIT_CONFIG["retry_delay"]
                 
                 if attempt < RATE_LIMIT_CONFIG["max_retries"] - 1:
-                    st.warning(f"⏳ Rate limit hit. Waiting {retry_after} seconds... (Attempt {attempt + 1}/{RATE_LIMIT_CONFIG['max_retries']})")
+                    st.warning(f"⏳ Rate limit hit from OpenAI. Waiting {retry_after} seconds... (Attempt {attempt + 1}/{RATE_LIMIT_CONFIG['max_retries']})")
                     time.sleep(retry_after)
                     continue
                 else:
-                    return None, f"""⏳ **Rate Limit Exceeded**
+                    return None, f"""⏳ **OpenAI Rate Limit Exceeded**
                     
-Your OpenAI account has hit its rate limit. Solutions:
+Your OpenAI API is being throttled. This means:
 
-✅ Add $5-10 credits at https://platform.openai.com/account/billing
-✅ Wait {retry_after} seconds before trying again
-✅ Use fewer questions per quiz (3-5 instead of 10+)
+1. **No Credits/Billing**: You need to add payment method
+2. **Free Tier Exhausted**: Daily/monthly quota used up
+3. **Too Many Requests**: Hitting OpenAI's rate limits
 
-Check usage: https://platform.openai.com/usage"""
+**Solutions:**
+✅ Add credits: https://platform.openai.com/account/billing/overview
+✅ Check usage: https://platform.openai.com/usage
+✅ Wait a few minutes and try again
+✅ Reduce questions to 3-5 per quiz
+
+**Make sure:**
+- Your API key is valid
+- Billing is set up
+- You have available credits
+"""
             
             if response.status_code == 401:
-                return None, "❌ Invalid API key."
+                return None, """❌ **Invalid API Key**
+
+Your API key is not working. Please check:
+
+1. Copy your key again from: https://platform.openai.com/api-keys
+2. Make sure it starts with 'sk-proj-' or 'sk-'
+3. Update your `.streamlit/secrets.toml` file:
+   ```
+   OPENAI_API_KEY = "sk-proj-your-actual-key"
+   ```
+4. Restart the Streamlit app
+"""
             
             if response.status_code == 403:
                 return None, "❌ Access denied. Add credits at https://platform.openai.com/account/billing"
@@ -754,7 +774,6 @@ elif st.session_state.page == "quiz":
                         st.session_state.page = "main"
                         st.session_state.show_results = False
                         st.rerun()
-
 # -------------------------
 # HISTORY PAGE
 # -------------------------
@@ -816,5 +835,6 @@ elif st.session_state.page == "history":
         
 
         st.markdown("</div>", unsafe_allow_html=True)
+
 
 
