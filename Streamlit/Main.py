@@ -3,22 +3,48 @@ import requests
 import json
 import random
 from datetime import datetime
+import os
+import time
 
 # -------------------------
 # CONFIGURATION - OpenAI API Key
 # -------------------------
-try:
-    API_KEY = st.secrets["OPENAI_API_KEY"]
-except:
+def get_api_key():
+    """Get API key from multiple sources"""
+    api_key = os.environ.get("OPENAI_API_KEY")
+    
+    if not api_key:
+        try:
+            api_key = st.secrets.get("OPENAI_API_KEY")
+        except (FileNotFoundError, KeyError):
+            pass
+    
+    return api_key
+
+API_KEY = get_api_key()
+
+if not API_KEY:
     st.error("🚨 No API key found!")
     st.warning("""
-    **Please create `.streamlit/secrets.toml` with your OpenAI API key:**
+    **Please add your OpenAI API key using ONE of these methods:**
     
+    **Method 1: Streamlit Secrets (For local development)**
+    
+    Create `.streamlit/secrets.toml` in your project root:
+    ```toml
+    OPENAI_API_KEY = "sk-proj-your-openai-api-key-here"
     ```
-    OPENAI_API_KEY = "sk-your-openai-api-key-here"
+    
+    **Method 2: Environment Variable**
+    ```bash
+    export OPENAI_API_KEY="sk-proj-your-openai-api-key-here"
     ```
     
     Get your API key at: https://platform.openai.com/api-keys
+    
+    ⚠️ **IMPORTANT:** Make sure you have:
+    1. Added credits to your OpenAI account
+    2. Set up billing at https://platform.openai.com/account/billing
     """)
     st.stop()
 
@@ -26,22 +52,38 @@ except:
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 # -------------------------
-# Backend: OpenAI Quiz Generator
+# Rate Limiting Configuration
+# -------------------------
+RATE_LIMIT_CONFIG = {
+    "requests_per_minute": 3,
+    "min_delay_seconds": 20,
+    "max_retries": 3,
+    "retry_delay": 30
+}
+
+# -------------------------
+# Backend: OpenAI Quiz Generator with Rate Limiting
 # -------------------------
 def generate_quiz(text, num_questions=5):
-    """Generate quiz questions using OpenAI API"""
+    """Generate quiz questions using OpenAI API with rate limiting"""
     if not text or not text.strip():
         return None, "Please provide text to generate questions from."
     
     if not API_KEY:
         return None, "API key is required."
     
+    # Check last request time
+    if "last_api_call" in st.session_state:
+        elapsed = time.time() - st.session_state.last_api_call
+        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
+            wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
+            return None, f"⏳ Please wait {wait_time} seconds before generating another quiz."
+    
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {API_KEY}"
     }
 
-    # Optimized prompt for OpenAI
     prompt = f"""Create exactly {num_questions} multiple-choice questions from the following text.
 
 IMPORTANT: Return ONLY valid JSON in this EXACT format with no additional text:
@@ -70,95 +112,108 @@ Text to analyze:
     data = {
         "model": "gpt-3.5-turbo",
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful quiz generator that returns only valid JSON responses."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "system", "content": "You are a helpful quiz generator that returns only valid JSON responses."},
+            {"role": "user", "content": prompt}
         ],
         "temperature": 0.5,
         "max_tokens": 2048
     }
 
-    try:
-        response = requests.post(OPENAI_URL, headers=headers, json=data, timeout=30)
-        
-        if response.status_code != 200:
-            error_data = response.json() if response.text else {}
-            error_message = error_data.get('error', {}).get('message', 'Unknown error')
+    # Retry logic
+    for attempt in range(RATE_LIMIT_CONFIG["max_retries"]):
+        try:
+            st.session_state.last_api_call = time.time()
+            response = requests.post(OPENAI_URL, headers=headers, json=data, timeout=30)
+            
+            if response.status_code == 429:
+                retry_after = response.headers.get('Retry-After', RATE_LIMIT_CONFIG["retry_delay"])
+                try:
+                    retry_after = int(retry_after)
+                except:
+                    retry_after = RATE_LIMIT_CONFIG["retry_delay"]
+                
+                if attempt < RATE_LIMIT_CONFIG["max_retries"] - 1:
+                    st.warning(f"⏳ Rate limit hit. Waiting {retry_after} seconds... (Attempt {attempt + 1}/{RATE_LIMIT_CONFIG['max_retries']})")
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    return None, f"""⏳ **Rate Limit Exceeded**
+                    
+Your OpenAI account has hit its rate limit. Solutions:
+
+✅ Add $5-10 credits at https://platform.openai.com/account/billing
+✅ Wait {retry_after} seconds before trying again
+✅ Use fewer questions per quiz (3-5 instead of 10+)
+
+Check usage: https://platform.openai.com/usage"""
             
             if response.status_code == 401:
-                return None, "❌ Invalid API key. Please check your OpenAI API key."
-            elif response.status_code == 429:
-                return None, "⏳ Rate limit exceeded. Please wait a moment and try again."
-            elif response.status_code == 403:
-                return None, "❌ Access denied. Check your API key permissions."
-            else:
+                return None, "❌ Invalid API key."
+            
+            if response.status_code == 403:
+                return None, "❌ Access denied. Add credits at https://platform.openai.com/account/billing"
+            
+            if response.status_code != 200:
+                error_data = response.json() if response.text else {}
+                error_message = error_data.get('error', {}).get('message', 'Unknown error')
                 return None, f"❌ API Error {response.status_code}: {error_message}"
 
-        result = response.json()
-        
-        # Extract text from OpenAI's response structure
-        try:
-            generated_text = result['choices'][0]['message']['content']
-        except (KeyError, IndexError):
-            return None, "Failed to parse OpenAI response structure."
-        
-        # Clean markdown formatting if present
-        generated_text = generated_text.strip()
-        if generated_text.startswith('```json'):
-            generated_text = generated_text[7:]
-        if generated_text.startswith('```'):
-            generated_text = generated_text[3:]
-        if generated_text.endswith('```'):
-            generated_text = generated_text[:-3]
-        generated_text = generated_text.strip()
+            result = response.json()
+            generated_text = result['choices'][0]['message']['content'].strip()
+            
+            # Clean markdown
+            if generated_text.startswith('```json'):
+                generated_text = generated_text[7:]
+            if generated_text.startswith('```'):
+                generated_text = generated_text[3:]
+            if generated_text.endswith('```'):
+                generated_text = generated_text[:-3]
+            generated_text = generated_text.strip()
 
-        try:
-            quiz_data = json.loads(generated_text)
-        except json.JSONDecodeError:
-            # Try to extract JSON if wrapped in text
-            import re
-            match = re.search(r'\{.*\}', generated_text, re.DOTALL)
-            if match:
-                try:
-                    quiz_data = json.loads(match.group())
-                except:
-                    return None, "Failed to parse quiz response. Please try again."
-            else:
-                return None, "Failed to parse quiz response. Please try again."
+            try:
+                quiz_data = json.loads(generated_text)
+            except json.JSONDecodeError:
+                import re
+                match = re.search(r'\{.*\}', generated_text, re.DOTALL)
+                if match:
+                    try:
+                        quiz_data = json.loads(match.group())
+                    except:
+                        return None, "Failed to parse quiz response."
+                else:
+                    return None, "Failed to parse quiz response."
 
-        quiz_questions = quiz_data.get("quiz", [])
-        
-        if not quiz_questions:
-            return None, "No questions generated. Try with more detailed text."
-        
-        # Shuffle options while preserving correct answer
-        for q in quiz_questions:
-            if "options" in q and "answer" in q and "question" in q:
-                correct = q["answer"]
-                random.shuffle(q["options"])
-                q["answer"] = correct
-            else:
-                return None, "Invalid question format received."
+            quiz_questions = quiz_data.get("quiz", [])
+            
+            if not quiz_questions:
+                return None, "No questions generated. Try with more detailed text."
+            
+            for q in quiz_questions:
+                if "options" in q and "answer" in q and "question" in q:
+                    correct = q["answer"]
+                    random.shuffle(q["options"])
+                    q["answer"] = correct
+                else:
+                    return None, "Invalid question format received."
 
-        return quiz_questions, None
-        
-    except requests.exceptions.Timeout:
-        return None, "⏱️ Request timed out. Please try again."
-    except requests.exceptions.RequestException as e:
-        return None, f"🌐 Network error: {str(e)}"
-    except Exception as e:
-        return None, f"❌ Unexpected error: {str(e)}"
+            return quiz_questions, None
+            
+        except requests.exceptions.Timeout:
+            if attempt < RATE_LIMIT_CONFIG["max_retries"] - 1:
+                time.sleep(5)
+                continue
+            return None, "⏱️ Request timed out."
+        except requests.exceptions.RequestException as e:
+            return None, f"🌐 Network error: {str(e)}"
+        except Exception as e:
+            return None, f"❌ Unexpected error: {str(e)}"
+    
+    return None, "Failed after multiple retries."
 
 # -------------------------
 # Initialize Session State
 # -------------------------
 def init_session_state():
-    """Initialize all session state variables"""
     defaults = {
         "page": "main",
         "paragraphs": [],
@@ -167,9 +222,9 @@ def init_session_state():
         "user_answers": {},
         "show_results": False,
         "quiz_history": [],
-        "dark_mode": True,
         "num_questions": 5,
-        "api_calls_made": 0
+        "api_calls_made": 0,
+        "last_api_call": 0
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -181,109 +236,73 @@ init_session_state()
 # Page Configuration
 # -------------------------
 st.set_page_config(
-    page_title="📘 Smart Study Partner - OpenAI",
+    page_title="📘 Smart Study Partner",
     page_icon="📘",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # -------------------------
-# Dynamic Theme System
+# CSS Styling - Dark Mode Only
 # -------------------------
-def get_colors():
-    """Get color scheme based on dark/light mode"""
-    if st.session_state.dark_mode:
-        return {
-            'bg_primary': '#0f172a',
-            'bg_secondary': '#1e293b',
-            'bg_card': '#1e293b',
-            'bg_card_hover': '#334155',
-            'text_primary': '#f1f5f9',
-            'text_secondary': '#cbd5e1',
-            'text_tertiary': '#94a3b8',
-            'accent_primary': '#10b981',
-            'accent_secondary': '#34d399',
-            'border_color': '#334155',
-            'shadow': 'rgba(0, 0, 0, 0.5)',
-        }
-    else:
-        return {
-            'bg_primary': '#f1f5f9',
-            'bg_secondary': '#ffffff',
-            'bg_card': '#ffffff',
-            'bg_card_hover': '#f8fafc',
-            'text_primary': '#0f172a',
-            'text_secondary': '#1e293b',
-            'text_tertiary': '#475569',
-            'accent_primary': '#059669',
-            'accent_secondary': '#10b981',
-            'border_color': '#cbd5e1',
-            'shadow': 'rgba(0, 0, 0, 0.15)',
-        }
-
-colors = get_colors()
-
-# -------------------------
-# CSS Styling
-# -------------------------
-st.markdown(f"""
+st.markdown("""
 <style>
-    .stApp {{
-        background: {colors['bg_primary']};
-        color: {colors['text_primary']};
-    }}
+    .stApp {
+        background: #0f172a;
+        color: #f1f5f9;
+    }
     
-    #MainMenu {{visibility: hidden;}}
-    footer {{visibility: hidden;}}
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
     
-    .card {{
-        background: {colors['bg_card']};
+    .card {
+        background: #1e293b;
         padding: 1.5rem;
         border-radius: 12px;
-        border: 1px solid {colors['border_color']};
-        box-shadow: 0 4px 12px {colors['shadow']};
+        border: 1px solid #334155;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
         margin-bottom: 1.5rem;
         transition: all 0.3s ease;
-    }}
+    }
     
-    .card:hover {{
+    .card:hover {
         transform: translateY(-2px);
-        box-shadow: 0 6px 16px {colors['shadow']};
-    }}
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+    }
     
-    .question-box {{
-        background: {colors['bg_card']};
+    .question-box {
+        background: #1e293b;
         padding: 1.5rem;
         border-radius: 10px;
-        border-left: 4px solid {colors['accent_primary']};
-        border: 1px solid {colors['border_color']};
+        border-left: 4px solid #10b981;
+        border: 1px solid #334155;
         margin-bottom: 1.5rem;
-        color: {colors['text_primary']};
-    }}
+        color: #f1f5f9;
+    }
     
-    .stats-box {{
-        background: {colors['bg_card']};
+    .stats-box {
+        background: #1e293b;
         padding: 1.5rem;
         border-radius: 12px;
-        border: 2px solid {colors['accent_primary']};
+        border: 2px solid #10b981;
         text-align: center;
         margin-bottom: 1rem;
-    }}
+    }
     
-    .stats-number {{
+    .stats-number {
         font-size: 2rem;
         font-weight: bold;
-        color: {colors['accent_primary']};
-    }}
+        color: #10b981;
+    }
     
-    .stats-label {{
+    .stats-label {
         font-size: 0.9rem;
-        color: {colors['text_secondary']};
+        color: #cbd5e1;
         font-weight: 500;
-    }}
+    }
     
-    .stButton > button {{
-        background: linear-gradient(135deg, {colors['accent_primary']} 0%, {colors['accent_secondary']} 100%);
+    .stButton > button {
+        background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
         color: white;
         border-radius: 10px;
         padding: 0.6rem 1.2rem;
@@ -291,74 +310,78 @@ st.markdown(f"""
         border: none;
         transition: all 0.3s ease;
         width: 100%;
-    }}
+    }
     
-    .stButton > button:hover {{
+    .stButton > button:hover {
         transform: translateY(-2px);
         box-shadow: 0 6px 20px rgba(16, 185, 129, 0.4);
-    }}
+    }
     
-    .stProgress > div > div > div > div {{
-        background: linear-gradient(90deg, {colors['accent_primary']} 0%, {colors['accent_secondary']} 100%);
-    }}
+    .stButton > button:disabled {
+        background: #475569;
+        cursor: not-allowed;
+        transform: none;
+    }
     
-    .stRadio > div > label {{
-        background: {colors['bg_secondary']};
+    .stProgress > div > div > div > div {
+        background: linear-gradient(90deg, #10b981 0%, #34d399 100%);
+    }
+    
+    .stRadio > div > label {
+        background: #1e293b;
         padding: 0.75rem 1rem;
         border-radius: 8px;
-        border: 2px solid {colors['border_color']};
+        border: 2px solid #334155;
         margin-bottom: 0.5rem;
-        color: {colors['text_primary']};
+        color: #f1f5f9;
         cursor: pointer;
         transition: all 0.2s ease;
-    }}
+    }
     
-    .stRadio > div > label:hover {{
-        border-color: {colors['accent_primary']};
-        background: {colors['bg_card_hover']};
+    .stRadio > div > label:hover {
+        border-color: #10b981;
+        background: #334155;
         transform: translateX(4px);
-    }}
+    }
     
     .stTextArea > div > div > textarea,
-    .stTextInput > div > div > input {{
-        background: {colors['bg_secondary']};
-        color: {colors['text_primary']};
-        border: 1px solid {colors['border_color']};
+    .stTextInput > div > div > input {
+        background: #1e293b;
+        color: #f1f5f9;
+        border: 1px solid #334155;
         border-radius: 8px;
-    }}
+    }
     
-    section[data-testid="stSidebar"] {{
-        background: {colors['bg_secondary']};
-        border-right: 1px solid {colors['border_color']};
-    }}
+    section[data-testid="stSidebar"] {
+        background: #1e293b;
+        border-right: 1px solid #334155;
+    }
     
-    h1, h2, h3, h4, h5, h6 {{
-        color: {colors['text_primary']};
-    }}
+    h1, h2, h3, h4, h5, h6 {
+        color: #f1f5f9;
+    }
     
-    p {{
-        color: {colors['text_secondary']};
-    }}
+    p {
+        color: #cbd5e1;
+    }
     
-    .score-card {{
-        background: linear-gradient(135deg, {colors['accent_primary']} 0%, {colors['accent_secondary']} 100%);
+    .score-card {
+        background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
         padding: 2rem;
         border-radius: 16px;
         text-align: center;
         color: white;
         margin: 2rem 0;
-    }}
+    }
     
-    .openai-badge {{
-        background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
-        color: white;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        display: inline-block;
-        margin-bottom: 1rem;
-    }}
+    .rate-limit-warning {
+        background: #451a03;
+        border-left: 4px solid #f59e0b;
+        padding: 1rem;
+        border-radius: 8px;
+        color: #fbbf24;
+        margin: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -368,20 +391,27 @@ st.markdown(f"""
 with st.sidebar:
     st.title("📌 Navigation")
     
-    # OpenAI Badge
-    st.markdown('<div class="openai-badge">🤖 Powered by OpenAI GPT-3.5</div>', unsafe_allow_html=True)
-    
-    # Theme toggle
-    if st.button("🌙 Dark" if not st.session_state.dark_mode else "☀️ Light", key="theme_btn", use_container_width=True):
-        st.session_state.dark_mode = not st.session_state.dark_mode
-        st.rerun()
+    # Rate Limit Warning
+    if st.session_state.last_api_call > 0:
+        elapsed = time.time() - st.session_state.last_api_call
+        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
+            wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
+            st.markdown(f"""
+            <div class='rate-limit-warning'>
+                ⏳ <strong>Rate Limit Protection</strong><br>
+                Wait {wait_time}s before next generation
+            </div>
+            """, unsafe_allow_html=True)
     
     st.markdown("---")
     
     # Settings
     st.subheader("⚙️ Settings")
-    num_q = st.slider("Questions per quiz", 3, 15, st.session_state.num_questions, key="num_q_slider")
+    num_q = st.slider("Questions per quiz", 3, 10, min(st.session_state.num_questions, 10), 
+                      help="Fewer questions = less API usage", key="num_q_slider")
     st.session_state.num_questions = num_q
+    
+    st.info("💡 **Tip:** Start with 3-5 questions to avoid rate limits!")
     
     st.markdown("---")
     
@@ -398,16 +428,26 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
     
-    st.info("💡 **Tip:** Each quiz generation uses 1 API call. Retaking quizzes is free!")
+    st.warning("⚠️ **Free Tier:** 3 requests/min. Wait 20s between generations.")
+    
+    with st.expander("📖 Rate Limit Help"):
+        st.markdown("""
+        **Why am I seeing rate limits?**
+        
+        Free OpenAI accounts have strict limits.
+        
+        **Solutions:**
+        1. Add credits: https://platform.openai.com/account/billing
+        2. Wait 20-30 seconds between generations
+        3. Generate fewer questions (3-5 instead of 10+)
+        4. Reuse existing quizzes (no API calls!)
+        
+        **Check usage:** https://platform.openai.com/usage
+        """)
     
     st.markdown("---")
     
     # Navigation buttons
-    if st.button("🏠 Home", key="nav_home", use_container_width=True):
-        st.session_state.page = "main"
-        st.session_state.show_results = False
-        st.rerun()
-    
     if st.session_state.saved_quizzes:
         if st.button("📚 My Quizzes", key="nav_quizzes", use_container_width=True):
             st.session_state.page = "quiz_library"
@@ -440,7 +480,9 @@ with st.sidebar:
 if st.session_state.page == "main":
     st.title("📘 Smart Study Partner")
     st.markdown("### Transform your study materials into interactive quizzes!")
-    st.markdown('<div class="openai-badge">🤖 Powered by OpenAI GPT-3.5 Turbo</div>', unsafe_allow_html=True)
+    
+    # Rate limit info
+    st.info("⏳ **Rate Limit Info:** Wait 20 seconds between quiz generations to avoid errors!")
     
     # Input section
     st.markdown("<div class='card'>", unsafe_allow_html=True)
@@ -472,85 +514,87 @@ if st.session_state.page == "main":
     
     st.markdown("</div>", unsafe_allow_html=True)
     
-    # Saved paragraphs - Simplified view
+    # Saved paragraphs
     if st.session_state.paragraphs:
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.subheader(f"📚 My Study Materials ({len(st.session_state.paragraphs)})")
         
         for i, para in enumerate(st.session_state.paragraphs):
-            # Create a compact card for each paragraph
             para_preview = para[:120] + "..." if len(para) > 120 else para
             
-            # Check if quiz already generated
-            #if i in st.session_state.saved_quizzes:
-            # Saved paragraphs - Simplified view
-if st.session_state.paragraphs:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.subheader(f"📚 My Study Materials ({len(st.session_state.paragraphs)})")
-    
-    for i, para in enumerate(st.session_state.paragraphs):
-        para_preview = para[:120] + "..." if len(para) > 120 else para
-        
-        # Check if quiz already generated
-        if i in st.session_state.saved_quizzes:
-            col1, col2, col3 = st.columns([3, 1, 1])
-            with col1:
-                st.markdown(f"**✅ Material {i+1}:** {para_preview}")
-                st.caption(f"{len(st.session_state.saved_quizzes[i])} questions ready • {len(para)} characters")
-            with col2:
-                if st.button("📖 Take Quiz", key=f"take_quiz_{i}", use_container_width=True):
-                    st.session_state.current_quiz_index = i
-                    st.session_state.user_answers = {}
-                    st.session_state.show_results = False
-                    st.session_state.page = "quiz"
-                    st.rerun()
-            with col3:
-                if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, help="Regenerate quiz"):
-                    del st.session_state.saved_quizzes[i]
-                    with st.spinner("🤖 Regenerating..."):
-                        quiz, error = generate_quiz(para, st.session_state.num_questions)
-                    
-                    if error:
-                        st.error(f"{error}")
-                    elif quiz:
-                        st.session_state.saved_quizzes[i] = quiz
-                        st.session_state.api_calls_made += 1
-                        st.success("New quiz ready!")
+            if i in st.session_state.saved_quizzes:
+                col1, col2, col3 = st.columns([3, 1, 1])
+                with col1:
+                    st.markdown(f"**✅ Material {i+1}:** {para_preview}")
+                    st.caption(f"{len(st.session_state.saved_quizzes[i])} questions ready • {len(para)} characters")
+                with col2:
+                    if st.button("📖 Take Quiz", key=f"take_quiz_{i}", use_container_width=True):
+                        st.session_state.current_quiz_index = i
+                        st.session_state.user_answers = {}
+                        st.session_state.show_results = False
+                        st.session_state.page = "quiz"
                         st.rerun()
-        else:
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown(f"**📄 Material {i+1}:** {para_preview}")
-                st.caption(f"Ready to generate • {len(para)} characters")
-            with col2:
-                if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, type="primary"):
-                    with st.spinner("🤖 Creating quiz..."):
-                        quiz, error = generate_quiz(para, st.session_state.num_questions)
+                with col3:
+                    can_regenerate = True
+                    if st.session_state.last_api_call > 0:
+                        elapsed = time.time() - st.session_state.last_api_call
+                        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
+                            can_regenerate = False
                     
-                    if error:
-                        st.error(f"{error}")
-                    elif quiz:
-                        st.session_state.saved_quizzes[i] = quiz
-                        st.session_state.api_calls_made += 1
-                        st.success("Quiz ready! Click 'Take Quiz' to start.")
-                        st.rerun()
+                    if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, 
+                                help="Regenerate quiz" if can_regenerate else f"Wait {int(RATE_LIMIT_CONFIG['min_delay_seconds'] - elapsed)}s",
+                                disabled=not can_regenerate):
+                        del st.session_state.saved_quizzes[i]
+                        with st.spinner("🤖 Regenerating..."):
+                            quiz, error = generate_quiz(para, st.session_state.num_questions)
+                        
+                        if error:
+                            st.error(f"{error}")
+                        elif quiz:
+                            st.session_state.saved_quizzes[i] = quiz
+                            st.session_state.api_calls_made += 1
+                            st.success("New quiz ready!")
+                            st.rerun()
+            else:
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.markdown(f"**📄 Material {i+1}:** {para_preview}")
+                    st.caption(f"Ready to generate • {len(para)} characters")
+                with col2:
+                    can_generate = True
+                    wait_time = 0
+                    if st.session_state.last_api_call > 0:
+                        elapsed = time.time() - st.session_state.last_api_call
+                        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
+                            can_generate = False
+                            wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
+                    
+                    if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, 
+                                type="primary",
+                                disabled=not can_generate,
+                                help=f"Wait {wait_time}s" if not can_generate else "Generate quiz"):
+                        with st.spinner("🤖 Creating quiz..."):
+                            quiz, error = generate_quiz(para, st.session_state.num_questions)
+                        
+                        if error:
+                            st.error(f"{error}")
+                        elif quiz:
+                            st.session_state.saved_quizzes[i] = quiz
+                            st.session_state.api_calls_made += 1
+                            st.success("Quiz ready! Click 'Take Quiz' to start.")
+                            st.rerun()
+            
+            st.markdown("---")
         
-        # Optional: Show full text in expander below
-        if len(para) > 120:
-            with st.expander(f"View full text"):
-                st.text(para)
-        
-        st.markdown("---")
-    
-    st.markdown("</div>", unsafe_allow_html=True)  
-        
-        
+        st.markdown("</div>", unsafe_allow_html=True)
+
 # -------------------------
 # QUIZ LIBRARY PAGE
 # -------------------------
 elif st.session_state.page == "quiz_library":
     st.title("📚 My Quiz Library")
     st.markdown("### All your generated quizzes in one place!")
+    st.success("💡 **No API calls needed** - Retake any quiz unlimited times for FREE!")
     
     if not st.session_state.saved_quizzes:
         st.info("No quizzes generated yet. Go to Home and create some!")
@@ -590,7 +634,6 @@ elif st.session_state.page == "quiz":
         col_main, col_side = st.columns([3, 1])
         
         with col_side:
-            # Progress
             answered = len([k for k in st.session_state.user_answers.keys() if st.session_state.user_answers[k] is not None])
             st.markdown(f"""
             <div class='stats-box'>
@@ -600,7 +643,6 @@ elif st.session_state.page == "quiz":
             """, unsafe_allow_html=True)
             st.progress(answered / len(quiz))
             
-            # Submit button
             if st.button("✅ Submit Quiz", key="submit_btn", use_container_width=True, disabled=(answered < len(quiz))):
                 st.session_state.show_results = True
                 st.rerun()
@@ -617,7 +659,6 @@ elif st.session_state.page == "quiz":
         
         with col_main:
             if not st.session_state.show_results:
-                # Quiz questions
                 st.title("🎮 Quiz Time!")
                 st.success("💡 **No API calls used!** Retake this quiz unlimited times!")
                 
@@ -640,7 +681,6 @@ elif st.session_state.page == "quiz":
                     st.markdown("</div>", unsafe_allow_html=True)
             
             else:
-                # Results
                 st.title("📊 Quiz Results")
                 
                 score = 0
@@ -672,7 +712,6 @@ elif st.session_state.page == "quiz":
                     
                     st.markdown("</div>", unsafe_allow_html=True)
                 
-                # Score card
                 percentage = (score / total) * 100
                 
                 if percentage >= 80:
@@ -694,7 +733,6 @@ elif st.session_state.page == "quiz":
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Save to history
                 if not any(h.get("date") == datetime.now().strftime("%Y-%m-%d %H:%M") and h.get("quiz_index") == st.session_state.current_quiz_index for h in st.session_state.quiz_history):
                     st.session_state.quiz_history.append({
                         "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -704,7 +742,6 @@ elif st.session_state.page == "quiz":
                         "quiz_index": st.session_state.current_quiz_index
                     })
                 
-                # Action buttons
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("🔄 Retake Quiz (FREE!)", key="try_again", use_container_width=True):
@@ -779,4 +816,5 @@ elif st.session_state.page == "history":
         
 
         st.markdown("</div>", unsafe_allow_html=True)
+
 
