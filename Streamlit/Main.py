@@ -456,10 +456,7 @@ with st.sidebar:
     st.caption("💡 Powered by OpenAI GPT-4o-mini")
     st.caption("app.version-2.04.46")
     st.caption("🏎️Created by Kohil and Team in the supervision of Jitumani Das sir (ai Team KVU)")
-    st.caption(" TEAM 1. Kohil
-                      2. Adarsh
-                       3. Nihersa
-                       4. Rituraj")
+    st.caption("hi")
 # -------------------------
 # MAIN PAGE
 # -------------------------
@@ -964,6 +961,7 @@ elif st.session_state.page == "quiz":
                         st.session_state.page = "main"
                         st.session_state.show_results = False
                         st.rerun()
+
 
 
 
