@@ -52,20 +52,10 @@ if not API_KEY:
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 # -------------------------
-# Rate Limiting Configuration
-# -------------------------
-RATE_LIMIT_CONFIG = {
-    "requests_per_minute": 3,
-    "min_delay_seconds": 20,
-    "max_retries": 3,
-    "retry_delay": 30
-}
-
-# -------------------------
-# Backend: OpenAI Quiz Generator with Rate Limiting
+# Backend: OpenAI Quiz Generator
 # -------------------------
 def generate_quiz(text, num_questions=5):
-    """Generate quiz questions using OpenAI API with rate limiting"""
+    """Generate quiz questions using OpenAI API"""
     if not text or not text.strip():
         return None, "Please provide text to generate questions from."
     
@@ -103,157 +93,78 @@ Text to analyze:
 {text[:2000]}"""
 
     data = {
-        "model": "gpt-4o-mini",  # Using newer model instead of gpt-3.5-turbo
+        "model": "gpt-4o-mini",
         "messages": [
             {"role": "system", "content": "You are a helpful quiz generator that returns only valid JSON responses."},
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.5,
-        "max_tokens": 1500  # Reduced from 2048
+        "max_tokens": 1500
     }
 
-    # Retry logic
-    for attempt in range(RATE_LIMIT_CONFIG["max_retries"]):
+    try:
+        response = requests.post(OPENAI_URL, headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 429:
+            return None, "Rate limit exceeded. Please wait a moment and try again."
+        
+        if response.status_code == 401:
+            return None, "❌ Invalid API Key. Please check your configuration."
+        
+        if response.status_code == 403:
+            return None, "❌ Access Denied. Please ensure billing is set up at https://platform.openai.com/account/billing"
+        
+        if response.status_code != 200:
+            error_data = response.json() if response.text else {}
+            error_message = error_data.get('error', {}).get('message', 'Unknown error')
+            return None, f"API Error {response.status_code}: {error_message}"
+
+        result = response.json()
+        generated_text = result['choices'][0]['message']['content'].strip()
+        
+        # Clean markdown
+        if generated_text.startswith('```json'):
+            generated_text = generated_text[7:]
+        if generated_text.startswith('```'):
+            generated_text = generated_text[3:]
+        if generated_text.endswith('```'):
+            generated_text = generated_text[:-3]
+        generated_text = generated_text.strip()
+
         try:
-            response = requests.post(OPENAI_URL, headers=headers, json=data, timeout=30)
-            
-            if response.status_code == 429:
-                retry_after = response.headers.get('Retry-After', RATE_LIMIT_CONFIG["retry_delay"])
+            quiz_data = json.loads(generated_text)
+        except json.JSONDecodeError:
+            import re
+            match = re.search(r'\{.*\}', generated_text, re.DOTALL)
+            if match:
                 try:
-                    retry_after = int(retry_after)
+                    quiz_data = json.loads(match.group())
                 except:
-                    retry_after = RATE_LIMIT_CONFIG["retry_delay"]
-                
-                if attempt < RATE_LIMIT_CONFIG["max_retries"] - 1:
-                    st.warning(f"⏳ Rate limit hit from OpenAI. Waiting {retry_after} seconds... (Attempt {attempt + 1}/{RATE_LIMIT_CONFIG['max_retries']})")
-                    time.sleep(retry_after)
-                    continue
-                else:
-                    return None, f"""⏳ **OpenAI Rate Limit Exceeded**
-                    
-Your OpenAI API is being throttled. This means:
-
-1. **No Credits/Billing**: You need to add payment method
-2. **Free Tier Exhausted**: Daily/monthly quota used up
-3. **Too Many Requests**: Hitting OpenAI's rate limits
-
-**Solutions:**
-✅ Add credits: https://platform.openai.com/account/billing/overview
-✅ Check usage: https://platform.openai.com/usage
-✅ Wait a few minutes and try again
-✅ Reduce questions to 3-5 per quiz
-
-**Make sure:**
-- Your API key is valid
-- Billing is set up
-- You have available credits
-"""
-            
-            if response.status_code == 401:
-                return None, """❌ **Invalid API Key**
-
-Your API key is not working. Please check:
-
-1. Copy your key again from: https://platform.openai.com/api-keys
-2. Make sure it starts with 'sk-proj-' or 'sk-'
-3. Update your `.streamlit/secrets.toml` file:
-   ```
-   OPENAI_API_KEY = "sk-proj-your-actual-key"
-   ```
-4. Restart the Streamlit app
-"""
-            
-            if response.status_code == 403:
-                return None, """❌ **Access Denied - No Billing Setup**
-                
-Your API key exists but has no access. This means:
-
-**You MUST set up billing first:**
-1. Go to: https://platform.openai.com/account/billing/overview
-2. Click "Add payment method"
-3. Add a credit/debit card
-4. Add at least $5 in credits
-5. Wait 5-10 minutes for activation
-
-**Note:** Even with a valid API key, you CANNOT use the API without adding a payment method and credits.
-
-Check your account status: https://platform.openai.com/account/billing/overview
-"""
-            
-            if response.status_code != 200:
-                error_data = response.json() if response.text else {}
-                error_message = error_data.get('error', {}).get('message', 'Unknown error')
-                
-                # Show detailed error
-                return None, f"""❌ **OpenAI API Error {response.status_code}**
-
-{error_message}
-
-**Common Issues:**
-- 401: Invalid API key
-- 403: No billing/credits set up
-- 429: Rate limit or quota exceeded
-- 500: OpenAI server error (try again)
-
-**Check:**
-1. API Key: https://platform.openai.com/api-keys
-2. Billing: https://platform.openai.com/account/billing/overview
-3. Usage: https://platform.openai.com/usage
-
-**Full error:** {error_data}
-"""
-
-            result = response.json()
-            generated_text = result['choices'][0]['message']['content'].strip()
-            
-            # Clean markdown
-            if generated_text.startswith('```json'):
-                generated_text = generated_text[7:]
-            if generated_text.startswith('```'):
-                generated_text = generated_text[3:]
-            if generated_text.endswith('```'):
-                generated_text = generated_text[:-3]
-            generated_text = generated_text.strip()
-
-            try:
-                quiz_data = json.loads(generated_text)
-            except json.JSONDecodeError:
-                import re
-                match = re.search(r'\{.*\}', generated_text, re.DOTALL)
-                if match:
-                    try:
-                        quiz_data = json.loads(match.group())
-                    except:
-                        return None, "Failed to parse quiz response."
-                else:
                     return None, "Failed to parse quiz response."
+            else:
+                return None, "Failed to parse quiz response."
 
-            quiz_questions = quiz_data.get("quiz", [])
-            
-            if not quiz_questions:
-                return None, "No questions generated. Try with more detailed text."
-            
-            for q in quiz_questions:
-                if "options" in q and "answer" in q and "question" in q:
-                    correct = q["answer"]
-                    random.shuffle(q["options"])
-                    q["answer"] = correct
-                else:
-                    return None, "Invalid question format received."
+        quiz_questions = quiz_data.get("quiz", [])
+        
+        if not quiz_questions:
+            return None, "No questions generated. Try with more detailed text."
+        
+        for q in quiz_questions:
+            if "options" in q and "answer" in q and "question" in q:
+                correct = q["answer"]
+                random.shuffle(q["options"])
+                q["answer"] = correct
+            else:
+                return None, "Invalid question format received."
 
-            return quiz_questions, None
-            
-        except requests.exceptions.Timeout:
-            if attempt < RATE_LIMIT_CONFIG["max_retries"] - 1:
-                time.sleep(5)
-                continue
-            return None, "⏱️ Request timed out."
-        except requests.exceptions.RequestException as e:
-            return None, f"🌐 Network error: {str(e)}"
-        except Exception as e:
-            return None, f"❌ Unexpected error: {str(e)}"
-    
-    return None, "Failed after multiple retries."
+        return quiz_questions, None
+        
+    except requests.exceptions.Timeout:
+        return None, "⏱️ Request timed out."
+    except requests.exceptions.RequestException as e:
+        return None, f"🌐 Network error: {str(e)}"
+    except Exception as e:
+        return None, f"❌ Unexpected error: {str(e)}"
 
 # -------------------------
 # Initialize Session State
@@ -269,7 +180,8 @@ def init_session_state():
         "quiz_history": [],
         "num_questions": 5,
         "api_calls_made": 0,
-        "last_api_call": 0
+        "total_questions_answered": 0,
+        "total_correct_answers": 0
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -288,7 +200,7 @@ st.set_page_config(
 )
 
 # -------------------------
-# CSS Styling - Dark Mode Only
+# CSS Styling
 # -------------------------
 st.markdown("""
 <style>
@@ -299,6 +211,20 @@ st.markdown("""
     
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    
+    .api-badge {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        background: linear-gradient(135deg, #10b981 0%, #34d399 100%);
+        color: white;
+        padding: 0.5rem 1rem;
+        border-radius: 20px;
+        font-size: 0.9rem;
+        font-weight: 600;
+        z-index: 9999;
+        box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+    }
     
     .card {
         background: #1e293b;
@@ -344,6 +270,14 @@ st.markdown("""
         font-size: 0.9rem;
         color: #cbd5e1;
         font-weight: 500;
+    }
+    
+    .mini-stat {
+        background: linear-gradient(135deg, #334155 0%, #1e293b 100%);
+        padding: 1rem;
+        border-radius: 10px;
+        text-align: center;
+        margin-bottom: 0.5rem;
     }
     
     .stButton > button {
@@ -419,145 +353,221 @@ st.markdown("""
         margin: 2rem 0;
     }
     
-    .rate-limit-warning {
-        background: #451a03;
-        border-left: 4px solid #f59e0b;
+    .history-item {
+        background: #1e293b;
         padding: 1rem;
-        border-radius: 8px;
-        color: #fbbf24;
-        margin: 1rem 0;
+        border-radius: 10px;
+        border-left: 4px solid #10b981;
+        margin-bottom: 1rem;
     }
 </style>
 """, unsafe_allow_html=True)
+
+# API Usage Badge (Top Left)
+st.markdown(f'<div class="api-badge">🤖 API Calls: {st.session_state.api_calls_made}</div>', unsafe_allow_html=True)
 
 # -------------------------
 # Sidebar Navigation
 # -------------------------
 with st.sidebar:
-    st.title("📌 Navigation")
+    st.title("📌NAV")
     
-    # Rate Limit Warning
-    if st.session_state.last_api_call > 0:
-        elapsed = time.time() - st.session_state.last_api_call
-        if elapsed < RATE_LIMIT_CONFIG["min_delay_seconds"]:
-            wait_time = int(RATE_LIMIT_CONFIG["min_delay_seconds"] - elapsed)
-            st.markdown(f"""
-            <div class='rate-limit-warning'>
-                ⏳ <strong>Rate Limit Protection</strong><br>
-                Wait {wait_time}s before next generation
-            </div>
-            """, unsafe_allow_html=True)
+    st.markdown("---")
+    
+    # Navigation Buttons
+    if st.button("🏠 Home", use_container_width=True):
+        st.session_state.page = "main"
+        st.session_state.show_results = False
+        st.rerun()
+    
+    if st.button("📚 My Quizzes", use_container_width=True):
+        st.session_state.page = "quiz_library"
+        st.rerun()
+    
+    if st.button("📊 Statistics", use_container_width=True):
+        st.session_state.page = "stats"
+        st.rerun()
+    
+    if st.button("📜 History", use_container_width=True):
+        st.session_state.page = "history"
+        st.rerun()
+    
+    st.markdown("---")
+    
+    # Quick Stats
+    st.subheader("📈 Quick Stats")
+    
+    accuracy = 0
+    if st.session_state.total_questions_answered > 0:
+        accuracy = (st.session_state.total_correct_answers / st.session_state.total_questions_answered) * 100
+    
+    st.markdown(f"""
+    <div class='mini-stat'>
+        <div style='font-size: 1.5rem; font-weight: bold; color: #10b981;'>{len(st.session_state.saved_quizzes)}</div>
+        <div style='font-size: 0.8rem; color: #cbd5e1;'>Total Quizzes</div>
+    </div>
+    <div class='mini-stat'>
+        <div style='font-size: 1.5rem; font-weight: bold; color: #10b981;'>{st.session_state.total_questions_answered}</div>
+        <div style='font-size: 0.8rem; color: #cbd5e1;'>Questions Answered</div>
+    </div>
+    <div class='mini-stat'>
+        <div style='font-size: 1.5rem; font-weight: bold; color: #10b981;'>{accuracy:.1f}%</div>
+        <div style='font-size: 0.8rem; color: #cbd5e1;'>Overall Accuracy</div>
+    </div>
+    """, unsafe_allow_html=True)
     
     st.markdown("---")
     
     # Settings
     st.subheader("⚙️ Settings")
-    num_q = st.slider("Questions per quiz", 3, 10, min(st.session_state.num_questions, 10), 
-                      help="Fewer questions = less API usage", key="num_q_slider")
+    num_q = st.slider("Questions per quiz", 3, 10, st.session_state.num_questions)
     st.session_state.num_questions = num_q
     
-    st.info("💡 **Tip:** Start with 3-5 questions to avoid rate limits!")
-    
     st.markdown("---")
     
-    # API Usage Stats
-    st.subheader("📊 API Usage")
-    st.markdown(f"""
-    <div class='stats-box'>
-        <div class='stats-number'>{st.session_state.api_calls_made}</div>
-        <div class='stats-label'>API Calls Made</div>
-    </div>
-    <div class='stats-box'>
-        <div class='stats-number'>{len(st.session_state.saved_quizzes)}</div>
-        <div class='stats-label'>Quizzes Generated</div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Quick Actions
+    st.subheader("⚡ Quick Actions")
     
-    st.warning("⚠️ **Free Tier:** 3 requests/min. Wait 20s between generations.")
+    if st.button("🗑️ Clear All Data", use_container_width=True):
+        if st.session_state.paragraphs or st.session_state.saved_quizzes:
+            st.session_state.paragraphs = []
+            st.session_state.saved_quizzes = {}
+            st.session_state.quiz_history = []
+            st.success("🗑️ All data cleared!")
+            st.rerun()
     
-    with st.expander("📖 Rate Limit Help"):
-        st.markdown("""
-        **Why am I seeing rate limits?**
-        
-        Free OpenAI accounts have strict limits.
-        
-        **Solutions:**
-        1. Add credits: https://platform.openai.com/account/billing
-        2. Wait 20-30 seconds between generations
-        3. Generate fewer questions (3-5 instead of 10+)
-        4. Reuse existing quizzes (no API calls!)
-        
-        **Check usage:** https://platform.openai.com/usage
-        """)
+    if st.button("🔄 Reset Stats", use_container_width=True):
+        st.session_state.api_calls_made = 0
+        st.session_state.total_questions_answered = 0
+        st.session_state.total_correct_answers = 0
+        st.success("📊 Stats reset!")
+        st.rerun()
     
-    st.markdown("---")
-    
-    # Navigation buttons
     if st.session_state.saved_quizzes:
-        if st.button("📚 My Quizzes", key="nav_quizzes", use_container_width=True):
-            st.session_state.page = "quiz_library"
-            st.rerun()
-    
-    if st.session_state.quiz_history:
-        if st.button("📊 View History", key="nav_history", use_container_width=True):
-            st.session_state.page = "history"
+        if st.button("🎲 Random Quiz", use_container_width=True):
+            random_idx = random.choice(list(st.session_state.saved_quizzes.keys()))
+            st.session_state.current_quiz_index = random_idx
+            st.session_state.user_answers = {}
+            st.session_state.show_results = False
+            st.session_state.page = "quiz"
             st.rerun()
     
     st.markdown("---")
-    
-    # Overall Stats
-    if st.session_state.quiz_history:
-        avg_score = sum(h["score"] for h in st.session_state.quiz_history) / len(st.session_state.quiz_history)
-        st.markdown(f"""
-        <div class='stats-box'>
-            <div class='stats-number'>{len(st.session_state.quiz_history)}</div>
-            <div class='stats-label'>Quizzes Completed</div>
-        </div>
-        <div class='stats-box'>
-            <div class='stats-number'>{avg_score:.1f}%</div>
-            <div class='stats-label'>Average Score</div>
-        </div>
-        """, unsafe_allow_html=True)
+    st.caption("💡 Powered by OpenAI GPT-4o-mini")
+    st.caption("version-2.04.46")
+    st.caption("🏎️Created by Kohil and Team in the supervision of Jitumani Das sir (ai Team KVU)")
 
 # -------------------------
 # MAIN PAGE
 # -------------------------
 if st.session_state.page == "main":
-    st.title("📘 Smart Study Partner")
-    st.markdown("### Transform your study materials into interactive quizzes!")
+    # Hero Section
+    st.markdown("""
+    <div style='text-align: center; padding: 2rem 0 1rem 0;'>
+        <h1 style='font-size: 3rem; font-weight: 800; background: linear-gradient(135deg, #10b981 0%, #34d399 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem;'>
+            Smart Study Partner
+        </h1>
+        <p style='font-size: 1.2rem; color: #94a3b8; margin-bottom: 2rem;'>
+            Turn your notes into powerful learning tools with AI-powered quizzes
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Rate limit info
-    st.info("⏳ **Rate Limit Info:** Wait 20 seconds between quiz generations to avoid errors!")
-    
-    # Input section
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    user_input = st.text_area(
-        "📥 Paste Your Study Material",
-        height=200,
-        placeholder="Enter your paragraph, notes, or study material here (up to 2000 characters)...",
-        max_chars=2000,
-        key="main_input"
-    )
-    
-    col1, col2 = st.columns(2)
+    # Feature highlights
+    col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("➕ Add Paragraph", key="add_para", use_container_width=True):
+        st.markdown("""
+        <div style='text-align: center; padding: 1.5rem; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border-radius: 12px; border: 1px solid #10b981;'>
+            <div style='font-size: 2.5rem; margin-bottom: 0.5rem;'>⚡</div>
+            <h3 style='color: #10b981; margin-bottom: 0.5rem;'>Instant Generation</h3>
+            <p style='color: #cbd5e1; font-size: 0.9rem;'>Create quizzes in seconds from any text</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown("""
+        <div style='text-align: center; padding: 1.5rem; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border-radius: 12px; border: 1px solid #10b981;'>
+            <div style='font-size: 2.5rem; margin-bottom: 0.5rem;'>🎯</div>
+            <h3 style='color: #10b981; margin-bottom: 0.5rem;'>Smart Questions</h3>
+            <p style='color: #cbd5e1; font-size: 0.9rem;'>AI generates relevant, challenging questions</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown("""
+        <div style='text-align: center; padding: 1.5rem; background: linear-gradient(135deg, #1e293b 0%, #334155 100%); border-radius: 12px; border: 1px solid #10b981;'>
+            <div style='font-size: 2.5rem; margin-bottom: 0.5rem;'>📊</div>
+            <h3 style='color: #10b981; margin-bottom: 0.5rem;'>Track Progress</h3>
+            <p style='color: #cbd5e1; font-size: 0.9rem;'>Monitor your learning journey</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Input section with enhanced design
+    st.markdown("""
+    <div style='background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); padding: 2rem; border-radius: 16px; border: 2px solid #10b981; box-shadow: 0 8px 24px rgba(16, 185, 129, 0.2);'>
+        <h2 style='color: #10b981; margin-bottom: 1rem; display: flex; align-items: center;'>
+            <span style='font-size: 1.5rem; margin-right: 0.5rem;'>📝</span>
+            Create Your Quiz
+        </h2>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("<div style='margin-top: -1rem;'>", unsafe_allow_html=True)
+    user_input = st.text_area(
+        "Paste your study material below",
+        height=180,
+        placeholder="📚 Paste your notes, textbook paragraphs, or any study material here...\n\n💡 Tip: The more detailed your text, the better the questions!\n\n✨ Supports up to 2000 characters",
+        max_chars=2000,
+        key="main_input",
+        label_visibility="collapsed"
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Character counter
+    char_count = len(user_input) if user_input else 0
+    progress_color = "#10b981" if char_count < 1800 else "#f59e0b" if char_count < 2000 else "#ef4444"
+    st.markdown(f"""
+    <div style='text-align: right; color: {progress_color}; font-size: 0.85rem; margin-top: -0.5rem; margin-bottom: 1rem;'>
+        {char_count} / 2000 characters
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1:
+        if st.button("➕ Save Material", key="add_para", use_container_width=True):
             if user_input and user_input.strip():
                 st.session_state.paragraphs.append(user_input.strip())
-                st.success("✅ Paragraph added!")
+                st.success("✅ Material saved successfully!")
                 st.rerun()
             else:
                 st.warning("⚠️ Please enter some text first!")
     
     with col2:
+        generate_disabled = not (user_input and user_input.strip())
+        if st.button("⚡ Generate Quiz Now", key="add_gen", use_container_width=True, type="primary", disabled=generate_disabled):
+            st.session_state.paragraphs.append(user_input.strip())
+            idx = len(st.session_state.paragraphs) - 1
+            
+            with st.spinner("🤖 AI is crafting your questions..."):
+                quiz, error = generate_quiz(user_input.strip(), st.session_state.num_questions)
+            
+            if error:
+                st.error(f"❌ {error}")
+            elif quiz:
+                st.session_state.saved_quizzes[idx] = quiz
+                st.session_state.api_calls_made += 1
+                st.success(f"✅ Generated {len(quiz)} questions! Scroll down to take the quiz.")
+                st.rerun()
+    
+    with col3:
         if st.session_state.paragraphs:
             if st.button("🗑️ Clear All", key="clear_all", use_container_width=True):
                 st.session_state.paragraphs = []
                 st.session_state.saved_quizzes = {}
                 st.success("🗑️ All cleared!")
                 st.rerun()
-    
-    st.markdown("</div>", unsafe_allow_html=True)
     
     # Saved paragraphs
     if st.session_state.paragraphs:
@@ -568,20 +578,19 @@ if st.session_state.page == "main":
             para_preview = para[:120] + "..." if len(para) > 120 else para
             
             if i in st.session_state.saved_quizzes:
-                col1, col2, col3 = st.columns([3, 1, 1])
+                col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
                 with col1:
                     st.markdown(f"**✅ Material {i+1}:** {para_preview}")
                     st.caption(f"{len(st.session_state.saved_quizzes[i])} questions ready • {len(para)} characters")
                 with col2:
-                    if st.button("📖 Take Quiz", key=f"take_quiz_{i}", use_container_width=True):
+                    if st.button("📖 Take", key=f"take_quiz_{i}", use_container_width=True):
                         st.session_state.current_quiz_index = i
                         st.session_state.user_answers = {}
                         st.session_state.show_results = False
                         st.session_state.page = "quiz"
                         st.rerun()
                 with col3:
-                    # No more local rate limiting
-                    if st.button("🔄", key=f"regen_quiz_{i}", use_container_width=True, help="Regenerate quiz"):
+                    if st.button("🔄 Regen", key=f"regen_quiz_{i}", use_container_width=True):
                         del st.session_state.saved_quizzes[i]
                         with st.spinner("🤖 Regenerating..."):
                             quiz, error = generate_quiz(para, st.session_state.num_questions)
@@ -591,16 +600,21 @@ if st.session_state.page == "main":
                         elif quiz:
                             st.session_state.saved_quizzes[i] = quiz
                             st.session_state.api_calls_made += 1
-                            st.session_state.last_api_call = time.time()  # Record successful call
                             st.success("New quiz ready!")
                             st.rerun()
+                with col4:
+                    if st.button("🗑️", key=f"del_{i}", use_container_width=True):
+                        del st.session_state.paragraphs[i]
+                        if i in st.session_state.saved_quizzes:
+                            del st.session_state.saved_quizzes[i]
+                        st.success("🗑️ Deleted!")
+                        st.rerun()
             else:
-                col1, col2 = st.columns([4, 1])
+                col1, col2, col3 = st.columns([4, 1, 1])
                 with col1:
                     st.markdown(f"**📄 Material {i+1}:** {para_preview}")
                     st.caption(f"Ready to generate • {len(para)} characters")
                 with col2:
-                    # No more local rate limiting - just check button state
                     if st.button("⚡ Generate", key=f"gen_quiz_{i}", use_container_width=True, type="primary"):
                         with st.spinner("🤖 Creating quiz..."):
                             quiz, error = generate_quiz(para, st.session_state.num_questions)
@@ -610,9 +624,13 @@ if st.session_state.page == "main":
                         elif quiz:
                             st.session_state.saved_quizzes[i] = quiz
                             st.session_state.api_calls_made += 1
-                            st.session_state.last_api_call = time.time()  # Record successful call
-                            st.success("Quiz ready! Click 'Take Quiz' to start.")
+                            st.success("Quiz ready!")
                             st.rerun()
+                with col3:
+                    if st.button("🗑️", key=f"del2_{i}", use_container_width=True):
+                        del st.session_state.paragraphs[i]
+                        st.success("🗑️ Deleted!")
+                        st.rerun()
             
             st.markdown("---")
         
@@ -624,30 +642,168 @@ if st.session_state.page == "main":
 elif st.session_state.page == "quiz_library":
     st.title("📚 My Quiz Library")
     st.markdown("### All your generated quizzes in one place!")
-    st.success("💡 **No API calls needed** - Retake any quiz unlimited times for FREE!")
+    
+    if st.button("🏠 Go Home", use_container_width=True):
+        st.session_state.page = "main"
+        st.rerun()
     
     if not st.session_state.saved_quizzes:
         st.info("No quizzes generated yet. Go to Home and create some!")
-        if st.button("🏠 Go Home", key="lib_home"):
-            st.session_state.page = "main"
-            st.rerun()
     else:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.markdown(f"**Total Quizzes:** {len(st.session_state.saved_quizzes)}")
         
         for idx, quiz in st.session_state.saved_quizzes.items():
             para_preview = st.session_state.paragraphs[idx][:100] + "..." if len(st.session_state.paragraphs[idx]) > 100 else st.session_state.paragraphs[idx]
             
-            with st.expander(f"📖 Quiz {idx+1} - {len(quiz)} questions"):
+            st.markdown("<div class='card'>", unsafe_allow_html=True)
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"### 📖 Quiz {idx+1}")
+                st.markdown(f"**Questions:** {len(quiz)}")
                 st.markdown(f"**Source:** {para_preview}")
-                
-                if st.button(f"▶️ Take This Quiz", key=f"lib_take_{idx}", use_container_width=True):
+            
+            with col2:
+                if st.button(f"▶️ Take", key=f"lib_take_{idx}", use_container_width=True):
                     st.session_state.current_quiz_index = idx
                     st.session_state.user_answers = {}
                     st.session_state.show_results = False
                     st.session_state.page = "quiz"
                     st.rerun()
+                
+                if st.button(f"🗑️ Delete", key=f"libdel_{idx}", use_container_width=True):
+                    del st.session_state.saved_quizzes[idx]
+                    del st.session_state.paragraphs[idx]
+                    st.success("🗑️ Quiz deleted!")
+                    st.rerun()
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+
+# -------------------------
+# STATISTICS PAGE
+# -------------------------
+elif st.session_state.page == "stats":
+    st.title("📊 Your Statistics")
+    
+    accuracy = 0
+    if st.session_state.total_questions_answered > 0:
+        accuracy = (st.session_state.total_correct_answers / st.session_state.total_questions_answered) * 100
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown(f"""
+        <div class='stats-box'>
+            <div class='stats-number'>{st.session_state.api_calls_made}</div>
+            <div class='stats-label'>API Calls Made</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class='stats-box'>
+            <div class='stats-number'>{len(st.session_state.saved_quizzes)}</div>
+            <div class='stats-label'>Quizzes Generated</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div class='stats-box'>
+            <div class='stats-number'>{len(st.session_state.quiz_history)}</div>
+            <div class='stats-label'>Quizzes Taken</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    col4, col5 = st.columns(2)
+    
+    with col4:
+        st.markdown(f"""
+        <div class='stats-box'>
+            <div class='stats-number'>{st.session_state.total_questions_answered}</div>
+            <div class='stats-label'>Total Questions Answered</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown(f"""
+        <div class='stats-box'>
+            <div class='stats-number'>{accuracy:.1f}%</div>
+            <div class='stats-label'>Overall Accuracy</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    if st.session_state.quiz_history:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("📈 Performance Over Time")
+        
+        scores = [h['score'] for h in st.session_state.quiz_history]
+        avg_score = sum(scores) / len(scores)
+        
+        st.markdown(f"**Average Score:** {avg_score:.1f}%")
+        st.markdown(f"**Best Score:** {max(scores):.1f}%")
+        st.markdown(f"**Latest Score:** {scores[-1]:.1f}%")
         
         st.markdown("</div>", unsafe_allow_html=True)
+
+# -------------------------
+# HISTORY PAGE
+# -------------------------
+elif st.session_state.page == "history":
+    st.title("📜 Quiz History")
+    
+    if st.button("🏠 Go Home", use_container_width=True):
+        st.session_state.page = "main"
+        st.rerun()
+    
+    if not st.session_state.quiz_history:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.info("📝 No quiz history yet. Complete a quiz to see your progress!")
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(f"""
+            <div class='stats-box'>
+                <div class='stats-number'>{len(st.session_state.quiz_history)}</div>
+                <div class='stats-label'>Total Attempts</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            avg = sum(h["score"] for h in st.session_state.quiz_history) / len(st.session_state.quiz_history)
+            st.markdown(f"""
+            <div class='stats-box'>
+                <div class='stats-number'>{avg:.1f}%</div>
+                <div class='stats-label'>Average Score</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col3:
+            best = max(h["score"] for h in st.session_state.quiz_history)
+            st.markdown(f"""
+            <div class='stats-box'>
+                <div class='stats-number'>{best:.1f}%</div>
+                <div class='stats-label'>Best Score</div>
+            </div>
+            """, unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        
+        st.subheader("### Recent Attempts")
+        for i, rec in enumerate(reversed(st.session_state.quiz_history)):
+            idx = len(st.session_state.quiz_history) - i
+            st.markdown(f"""
+            <div class='history-item'>
+                <h4>📝 Attempt #{idx}</h4>
+                <p><strong>Date:</strong> {rec['date']}</p>
+                <p><strong>Quiz:</strong> Material {rec.get('quiz_index', 'Unknown') + 1}</p>
+                <p><strong>Score:</strong> {rec['correct']}/{rec['total']} ({rec['score']:.1f}%)</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        if st.button("🗑️ Clear History", key="clear_history", use_container_width=True):
+            st.session_state.quiz_history = []
+            st.success("History cleared!")
+            st.rerun()
 
 # -------------------------
 # QUIZ PAGE
@@ -664,7 +820,9 @@ elif st.session_state.page == "quiz":
         col_main, col_side = st.columns([3, 1])
         
         with col_side:
-            answered = len([k for k in st.session_state.user_answers.keys() if st.session_state.user_answers[k] is not None])
+            # Count answered questions accurately
+            answered = sum(1 for i in range(len(quiz)) if st.session_state.user_answers.get(i) is not None)
+            
             st.markdown(f"""
             <div class='stats-box'>
                 <div class='stats-number'>{answered}/{len(quiz)}</div>
@@ -684,6 +842,11 @@ elif st.session_state.page == "quiz":
             
             if st.button("🏠 Home", key="quiz_home_sidebar", use_container_width=True):
                 st.session_state.page = "main"
+                st.session_state.show_results = False
+                st.rerun()
+            
+            if st.button("📚 My Quizzes", key="quiz_lib_sidebar", use_container_width=True):
+                st.session_state.page = "quiz_library"
                 st.session_state.show_results = False
                 st.rerun()
         
@@ -707,7 +870,10 @@ elif st.session_state.page == "quiz":
                         label_visibility="collapsed"
                     )
                     
-                    st.session_state.user_answers[i] = answer
+                    # Update answer immediately when selected
+                    if answer is not None:
+                        st.session_state.user_answers[i] = answer
+                    
                     st.markdown("</div>", unsafe_allow_html=True)
             
             else:
@@ -744,6 +910,20 @@ elif st.session_state.page == "quiz":
                 
                 percentage = (score / total) * 100
                 
+                # Update global stats
+                st.session_state.total_questions_answered += total
+                st.session_state.total_correct_answers += score
+                
+                # Add to history (avoid duplicates)
+                if not any(h.get("date") == datetime.now().strftime("%Y-%m-%d %H:%M") and h.get("quiz_index") == st.session_state.current_quiz_index for h in st.session_state.quiz_history):
+                    st.session_state.quiz_history.append({
+                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "score": percentage,
+                        "correct": score,
+                        "total": total,
+                        "quiz_index": st.session_state.current_quiz_index
+                    })
+                
                 if percentage >= 80:
                     emoji = "🏆"
                     message = "Excellent work!"
@@ -763,78 +943,24 @@ elif st.session_state.page == "quiz":
                 </div>
                 """, unsafe_allow_html=True)
                 
-                if not any(h.get("date") == datetime.now().strftime("%Y-%m-%d %H:%M") and h.get("quiz_index") == st.session_state.current_quiz_index for h in st.session_state.quiz_history):
-                    st.session_state.quiz_history.append({
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "score": percentage,
-                        "correct": score,
-                        "total": total,
-                        "quiz_index": st.session_state.current_quiz_index
-                    })
-                
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 with col1:
-                    if st.button("🔄 Retake Quiz (FREE!)", key="try_again", use_container_width=True):
+                    if st.button("🔄 Retake", key="try_again", use_container_width=True):
                         st.session_state.user_answers = {}
                         st.session_state.show_results = False
                         st.rerun()
                 
                 with col2:
-                    if st.button("🏠 Back Home", key="results_home", use_container_width=True):
+                    if st.button("📚 My Quizzes", key="results_lib", use_container_width=True):
+                        st.session_state.page = "quiz_library"
+                        st.session_state.show_results = False
+                        st.rerun()
+                
+                with col3:
+                    if st.button("🏠 Home", key="results_home", use_container_width=True):
                         st.session_state.page = "main"
                         st.session_state.show_results = False
                         st.rerun()
-
-# -------------------------
-# HISTORY PAGE
-# -------------------------
-elif st.session_state.page == "history":
-    st.title("📊 Quiz History")
-    if not st.session_state.quiz_history:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.info("📝 No quiz history yet. Complete a quiz to see your progress!")
-        if st.button("🏠 Go to Home", key="history_home", use_container_width=True):
-            st.session_state.page = "main"
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.markdown(f"""
-            <div class='stats-box'>
-                <div class='stats-number'>{len(st.session_state.quiz_history)}</div>
-                <div class='stats-label'>Total Attempts</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col2:
-            avg = sum(h["score"] for h in st.session_state.quiz_history) / len(st.session_state.quiz_history)
-            st.markdown(f"""
-            <div class='stats-box'>
-                <div class='stats-number'>{avg:.1f}%</div>
-                <div class='stats-label'>Average Score</div>
-            </div>
-            """, unsafe_allow_html=True)
-        with col3:
-            best = max(h["score"] for h in st.session_state.quiz_history)
-            st.markdown(f"""
-            <div class='stats-box'>
-                <div class='stats-number'>{best:.1f}%</div>
-                <div class='stats-label'>Best Score</div>
-            </div>
-            """, unsafe_allow_html=True)
-        st.markdown("### Recent Attempts")
-        for i, rec in enumerate(reversed(st.session_state.quiz_history)):
-            idx = len(st.session_state.quiz_history) - i
-            with st.expander(f"Attempt {idx} - {rec['date']} - Score: {rec['score']:.1f}%"):
-                st.markdown(f"**Quiz:** Paragraph {rec.get('quiz_index', 'Unknown') + 1}")
-                st.markdown(f"**Score:** {rec['correct']}/{rec['total']} ({rec['score']:.1f}%)")
-                st.progress(rec['score'] / 100)
-        if st.button("🗑️ Clear History", key="clear_history", use_container_width=True):
-            st.session_state.quiz_history = []
-            st.success("History cleared!")
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
 
 
 
