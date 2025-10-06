@@ -482,7 +482,7 @@ if st.session_state.page == "main":
             para_preview = para[:120] + "..." if len(para) > 120 else para
             
             # Check if quiz already generated
-            if i in st.session_state.saved_quizzes:
+            #if i in st.session_state.saved_quizzes:
             # Saved paragraphs - Simplified view
 if st.session_state.paragraphs:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
@@ -779,3 +779,4 @@ elif st.session_state.page == "history":
         
 
         st.markdown("</div>", unsafe_allow_html=True)
+
